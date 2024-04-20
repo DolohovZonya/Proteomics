@@ -1,0 +1,214 @@
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+install.packages("VIM")
+install.packages("limma")
+install.packages("ape")
+install.packages("dendextend")
+install.packages("RColorBrewer")
+install.packages("pvclust")
+install.packages("gplots")
+install.packages("BiocManager")
+install.packages("impute")
+install.packages("gProfileR")
+install.packages("gprofiler2")
+install.packages("Biostrings")
+install.packages("enrichplot")
+install.packages("HDO.db")
+install.packages("graphlayouts")
+required_packages <- c("enrichplot", "ggplot2", "Biobase", "graphlayouts")
+install_if_missing <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if(length(new_packages) > 0) {
+    install.packages(new_packages)
+  }
+}
+
+install_if_missing(required_packages)
+
+BiocManager::install("tidytree",force = TRUE)
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("enrichplot", force = TRUE)
+library(tidytree)
+library(enrichplot)
+library(graphlayouts)
+library(Biostrings)
+library(readxl)
+library(VIM)
+library(limma)
+library(ape)
+library(dendextend)
+library(RColorBrewer)
+library(pvclust)
+library(gplots)
+library(NMF)
+library(vegan)
+library(Biobase)
+library(DT)
+library(ggplot2)
+library(impute)
+library(ggrepel)
+library(dplyr)
+proteons <- read.csv("D:/Downloads/peaks_data.csv")
+tot <- ncol(proteons[, !names(proteons) %in% c("Accession", "Gene_id")])
+half <- tot / 2
+nan_row_counts <- rowSums(is.na(proteons[, !names(proteons) %in% c("Accession", "Gene_id")]))
+nan_rows <- rownames(proteons)[nan_row_counts > half]
+proteons_filtered <- proteons[!rownames(proteons) %in% nan_rows, ]
+proteons <- proteons[proteons$Gene_id != "nan", ]
+proteons_filtered <- proteons_filtered[, !names(proteons_filtered) %in% c("Description", "Accession")]
+proteons_filtered <- proteons_filtered[!duplicated(proteons_filtered$Gene_id), ]
+rownames(proteons_filtered) <- proteons_filtered$Gene_id
+proteons_filtered$Gene_id <- NULL
+proteons_filtered <- proteons_filtered %>% select(-Description...)
+proteons_matrix <- as.matrix(proteons_filtered)
+prot_trans <- t(proteons_matrix)
+knn_prot <- impute.knn(prot_trans, k = 5)
+knn_prot <- knn_prot$data
+knn_prot <- as.data.frame(knn_prot)
+knn_prot <- t(as.matrix(knn_prot))
+prot_experiment <- as.factor(c("1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2", "2"))
+pal <- brewer.pal(n = 9, name = "Set1")
+cols <- pal[prot_experiment]
+boxplot(knn_prot, outline = FALSE, main = "Исходные данные", col = cols)
+legend("topright", levels(prot_experiment), fill = pal, bty = "n", xpd = T)
+prot_log <- log2(knn_prot + 1)
+prot_norm <- normalizeQuantiles(as.matrix(prot_log))
+boxplot(prot_norm, outline = FALSE, main = "Нормализованные данные", col = cols)
+legend("topright", levels(prot_experiment), fill = pal, bty = "n", xpd = TRUE)
+prot_pca <- t(prot_norm)
+terapod_pca <- rda(prot_pca, scale = TRUE)
+rownames_template <- c(paste0("BT_", 1:14), paste0("CJK_", c(1:14, 16:20)))
+rownames(prot_pca) <- paste0(rownames_template)
+df_scores <- data.frame(prot_pca,
+                        scores(terapod_pca, display = "sites", choices = c(1, 2, 3), scaling = "sites"))
+p_scores <- ggplot(df_scores, aes(x = PC1, y = PC2)) + 
+  geom_point(aes(color = rownames(prot_pca)), alpha = 0.5) +
+  coord_equal(xlim = c(-3, 3), ylim = c(-3, 3)) + ggtitle(label = "Ординация в осях главных компонент") + theme_bw()
+p_scores
+num_rows <- nrow(prot_pca)
+maplot <- function(X1, X2, pch = 21, main = "MA-plot", xlab = "Average log-expression", ylab = "Expression log-ratio", lpars = list(col = "blue", lwd = 2), ...){
+  X <- (rowMeans(X2) + rowMeans(X1)) / 2
+  Y <- rowMeans(X2) - rowMeans(X1)
+  scatter.smooth(x = X, y = Y, main = main, pch = pch, xlab = xlab, ylab = ylab, lpars = lpars, ...)
+  abline(h = c(-1, 0, 1), lty = c(2, 1, 2))
+}
+
+expr_data <- as.matrix(prot_norm)
+pheno_data <- data.frame(prot_experiment)
+rownames(pheno_data) <- colnames(prot_norm)
+pheno_metadata <- data.frame(
+  labelDescription = c("Experimental condition"),
+  row.names=c("Condition"))
+pheno_data <- new("AnnotatedDataFrame",
+                  data = pheno_data,
+                  varMetadata = pheno_metadata)
+feature_data <- data.frame(Prot = rownames(expr_data))
+rownames(feature_data) <- rownames(expr_data)
+feature_metadata <- data.frame(
+  labelDescription = c("Protain name"),
+  row.names = c("Protain"))
+f_data <- new("AnnotatedDataFrame",
+              data = feature_data,
+              varMetadata = feature_metadata)
+exp_set <-
+  ExpressionSet(assayData = expr_data,
+                phenoData = pheno_data,
+                featureData = f_data)
+X <- model.matrix(~ prot_experiment, pData(exp_set))
+fit <- lmFit(exp_set, design = X, method = "robust")
+efit <- eBayes(fit)
+
+MA_limma_fixed <- function(efit, coef, n = 10, signif = TRUE, fdr = 0.05, lfc = 0, text = TRUE, cex.text = 0.8, col.text = "grey20", main = "MA-plot", xlab = "Average log-expression", ylab = "Expression log-ratio", pch = 19, pch.signif = 21, col = "darkgreen", alpha = 0.3, cex = 0.3, ...){
+  R <- efit$coefficients[, coef]
+  I <- efit$Amean
+  col_btransp <- adjustcolor(col, alpha.f = alpha)
+  plot(I, R, cex = cex, main = main, pch = pch, xlab = xlab, ylab = ylab, col = col_btransp, ...)
+  abline(h = 0)
+  if(signif){
+    sign <- p.adjust(efit$p.value[, coef], method = "BH") <= fdr
+    large <- abs(efit$coefficients[, coef]) >= lfc
+    points(I[sign & large], R[sign & large], cex = cex*2, col = "orange2", pch = pch.signif)
+  }
+}
+
+coeffic <- data.frame(efit$coefficients)
+MA_limma_fixed(efit, coef = 2)
+
+my_list <- topTable(efit, coef = 2, n = 1000)
+dif_exp_set <- exp_set[fData(exp_set)$Prot %in% my_list$Prot, ]
+dat <- as.matrix(exprs(dif_exp_set))
+
+
+pal_blue_red <- colorpanel(75, low = "steelblue", mid = "black", high = "red")
+heatmap.2(dat, col = pal_blue_red, scale = "row", key = TRUE, symkey = FALSE, density.info = "none", trace = "none", cexRow = 0.9, cexCol = 1, margins = c(4, 3), keysize = 0.8, key.par = list(mar = c(3, 0.1, 3, 0.1)))
+
+topTable(efit, coef = 2)
+numGenes <- nrow(exprs(exp_set))
+full_list <- topTable(efit, number = numGenes)
+full_list <- full_list[full_list$adj.P.Val <= 0.05,]
+MA_limma_fixed(efit, coef = 2, n = 4)
+my_list <- full_list
+volcano_list <- full_list
+volcano_list
+volcano_list$diffexpressed <- "NO" 
+volcano_list$diffexpressed[volcano_list$logFC > 1 & volcano_list$adj.P.Val < 0.05] <- "UP"
+volcano_list$diffexpressed[volcano_list$logFC < -1 & volcano_list$adj.P.Val < 0.05] <- "DOWN"
+volcanodif1 <- ggplot(data = volcano_list, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed)) + geom_point() + theme_minimal()
+volcanodif1
+diff_prot <- rownames(full_list)
+diff_expressed <- as.data.frame(prot_norm)[diff_prot,]
+t_diff_expressed <- t(diff_expressed)
+d <- dist(x = t_diff_expressed, method = "canberra")
+
+mouse_hc_avg <- hclust(d, method = "average")
+mouse_ph_avg <- as.phylo(mouse_hc_avg)
+mouse_den_avg <- as.dendrogram(mouse_hc_avg)
+
+get_colours <- function(dend, n_chars, palette = "Dark2"){
+  labs <- get_leaves_attr(dend, "label")
+  group <- substr(labs, start = 0, stop = n_chars)
+  group <- factor(group)
+  cols <- brewer.pal(length(levels(group)), name = palette)[group]
+  return(cols)
+}
+
+cols <- get_colours(dend = mouse_den_avg, n_chars = 6)
+den_avg_c <- color_labels(dend = mouse_den_avg, col = cols)
+plot(den_avg_c, horiz = TRUE)
+diff_prot <- rownames(full_list)
+diff_expressed <- as.data.frame(prot_norm)[diff_prot,]
+t_diff_expressed <- t(diff_expressed)
+sig <- subset(full_list, adj.P.Val < 0.05)
+up <- subset(sig, logFC > 2)
+down <- subset(sig, logFC < -2)
+up_names <- gconvert(row.names(up))
+down_names <- gconvert(row.names(down))
+multi_gp_up_reg <- gost(list("up-regulated" = up_names$name), multi_query = FALSE, evcodes = TRUE)
+gp_mod_up <- multi_gp_up_reg$result[, c("query", "source", "term_id","term_name", "p_value", "query_size", "intersection_size", "term_size", "effective_domain_size", "intersection")]
+gp_mod_up <- gp_mod_up[order(gp_mod_up$p_value), ]
+gp_mod_up_BP <- gp_mod_up[gp_mod_up$source == "GO:BP", ]
+gp_mod_up_BP$GeneRatio <- paste0(gp_mod_up_BP$intersection_size, "/", gp_mod_up_BP$query_size)
+gp_mod_up_BP$BgRatio <- paste0(gp_mod_up_BP$term_size, "/", gp_mod_up_BP$effective_domain_size)
+names(gp_mod_up_BP) <- c("Cluster", "Category", "ID", "Description", "p.adjust", "query_size", "Count", "term_size", "effective_domain_size", "geneID", "GeneRatio", "BgRatio")
+gp_mod_up_BP$geneID <- gsub(",", "/", gp_mod_up_BP$geneID)
+row.names(gp_mod_up_BP) <- gp_mod_up_BP$ID
+gp_mod_enrich_up_BP <- new("enrichResult", result = gp_mod_up_BP)
+multi_gp_down_reg <- gost(list("down-regulated" = down_names$name), multi_query = FALSE, evcodes = TRUE)
+gp_mod_down <- multi_gp_down_reg$result[, c("query", "source", "term_id","term_name", "p_value", "query_size", "intersection_size", "term_size", "effective_domain_size", "intersection")]
+gp_mod_down <- gp_mod_down[order(gp_mod_down$p_value), ]
+gp_mod_down_BP <- gp_mod_down[gp_mod_down$source == "GO:BP", ]
+gp_mod_down_BP$GeneRatio <- paste0(gp_mod_down_BP$intersection_size, "/", gp_mod_down_BP$query_size)
+gp_mod_down_BP$BgRatio <- paste0(gp_mod_down_BP$term_size, "/", gp_mod_down_BP$effective_domain_size)
+names(gp_mod_down_BP) <- c("Cluster", "Category", "ID", "Description", "p.adjust", "query_size", "Count", "term_size", "effective_domain_size", "geneID", "GeneRatio", "BgRatio")
+gp_mod_down_BP$geneID <- gsub(",", "/", gp_mod_down_BP$geneID)
+row.names(gp_mod_down_BP) <- gp_mod_down_BP$ID
+gp_mod_enrich_down_BP <- new("enrichResult", result = gp_mod_down_BP)
+
+enrichplot::dotplot(gp_mod_enrich_up_BP, showCategory = 10) +
+  ggplot2::labs(title = "up-regulated") +
+  ggplot2::scale_color_gradient(low = "lightseagreen", high = "darkorange1")
+
+enrichplot::dotplot(gp_mod_enrich_down_BP, showCategory = 10) +
+  ggplot2::labs(title = "down-regulated") +
+  ggplot2::scale_color_gradient(low = "lightseagreen", high = "darkorange1")
+
